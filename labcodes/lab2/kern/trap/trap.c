@@ -46,6 +46,15 @@ idt_init(void) {
       *     You don't know the meaning of this instruction? just google it! and check the libs/x86.h to know more.
       *     Notice: the argument of lidt is idt_pd. try to find it!
       */
+      extern uintptr_t __vectors[];
+      for (int i = 0; i < 256; i++) {
+          SETGATE(idt[i], 0, GD_KTEXT, __vectors[i], DPL_KERNEL);
+      }
+      // 这里对系统调用做特殊处理：系统调用的编号0x80已经在trap.h中定义为T_SYSCALL，我们把系统调用的istrap设为1，
+      // 把描述符权限级别设置为3，因为系统调用是向普通用户进程暴露的服务接口，权限应该设置为用户级别。
+      SETGATE(idt[T_SYSCALL], 1, GD_KTEXT, __vectors[T_SYSCALL], DPL_USER);
+      SETGATE(idt[T_SWITCH_TOK], 0, GD_KTEXT, __vectors[T_SWITCH_TOK], DPL_USER);
+      lidt(&idt_pd);
 }
 
 static const char *
@@ -134,6 +143,24 @@ print_regs(struct pushregs *regs) {
     cprintf("  eax  0x%08x\n", regs->reg_eax);
 }
 
+static void
+switch_to_user(struct trapframe *tf) {
+    if (tf->tf_cs != USER_CS) {
+        tf->tf_cs = USER_CS;
+        tf->tf_ds = tf->tf_es = tf->tf_ss = USER_DS;
+        tf->tf_eflags |= FL_IOPL_MASK;
+    }
+}
+
+static void
+switch_to_kernel(struct trapframe *tf) {
+    if (tf->tf_cs != KERNEL_CS) {
+        tf->tf_cs = KERNEL_CS;
+        tf->tf_ds = tf->tf_es = tf->tf_ss = KERNEL_DS;
+        tf->tf_eflags &= ~FL_IOPL_MASK;
+    }
+}
+
 /* trap_dispatch - dispatch based on what type of trap occurred */
 static void
 trap_dispatch(struct trapframe *tf) {
@@ -147,6 +174,9 @@ trap_dispatch(struct trapframe *tf) {
          * (2) Every TICK_NUM cycle, you can print some info using a funciton, such as print_ticks().
          * (3) Too Simple? Yes, I think so!
          */
+        ticks++;
+        if ((ticks % TICK_NUM) == 0)
+            print_ticks();
         break;
     case IRQ_OFFSET + IRQ_COM1:
         c = cons_getc();
@@ -154,13 +184,30 @@ trap_dispatch(struct trapframe *tf) {
         break;
     case IRQ_OFFSET + IRQ_KBD:
         c = cons_getc();
+        switch (c) {
+            case '0':
+                cprintf("+++ switch to  kernel  mode +++\n");
+                switch_to_kernel(tf);
+                print_trapframe(tf);
+                break;
+            case '3':
+                cprintf("+++ switch to user mode +++\n");
+                switch_to_user(tf);
+                print_trapframe(tf);
+                break;
+        }
         cprintf("kbd [%03d] %c\n", c, c);
         break;
+
     //LAB1 CHALLENGE 1 : YOUR CODE you should modify below codes.
     case T_SWITCH_TOU:
-    case T_SWITCH_TOK:
-        panic("T_SWITCH_** ??\n");
+        switch_to_user(tf);
         break;
+
+    case T_SWITCH_TOK:
+        switch_to_kernel(tf);
+        break;
+
     case IRQ_OFFSET + IRQ_IDE1:
     case IRQ_OFFSET + IRQ_IDE2:
         /* do nothing */
